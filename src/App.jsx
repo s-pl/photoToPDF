@@ -1,4 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import Cropper from 'react-easy-crop';
+import 'react-easy-crop/react-easy-crop.css';
 import './DocumentScanner.css';
 import { Camera, FileText, CreditCard, Check, X, RotateCcw, Download, Plus, Trash2, Crop } from 'lucide-react';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
@@ -10,30 +12,45 @@ const DocumentScanner = () => {
   const [dniImages, setDniImages] = useState({ front: null, back: null });
   const [stream, setStream] = useState(null);
   const [isDetecting, setIsDetecting] = useState(false);
+  
+  // --- CROP STATE ---
   const [cropMode, setCropMode] = useState(false);
   const [currentCrop, setCurrentCrop] = useState({ type: null, index: null, src: null });
-  const [cropPoints, setCropPoints] = useState({ x: 40, y: 40, width: 300, height: 400 });
-  const cropDragRef = useRef({ active: false, mode: 'move', startX: 0, startY: 0, start: { x: 0, y: 0, width: 0, height: 0 } });
-  const cropStageRef = useRef(null);
-  const cropImgRef = useRef(null);
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState(null);
+  // --- END CROP STATE ---
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const detectionIntervalRef = useRef(null);
 
+  const stopCamera = useCallback(() => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(t => t.stop());
+      videoRef.current.srcObject = null;
+    }
+    setStream(null);
+    if (detectionIntervalRef.current) {
+      clearInterval(detectionIntervalRef.current);
+      detectionIntervalRef.current = null;
+    }
+    setIsDetecting(false);
+  }, [stream]);
+
   useEffect(() => {
     return () => {
       stopCamera();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [stopCamera]);
 
   const startCamera = async () => {
+    // Make sure to stop any existing stream before starting a new one.
+    stopCamera(); 
     try {
-      // Stop previous stream if any
-      if (stream) {
-        try { stream.getTracks().forEach(t => t.stop()); } catch {}
-      }
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'environment',
@@ -62,75 +79,12 @@ const DocumentScanner = () => {
     }
   };
 
-  const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
-    }
+  const stopCameraAndClear = () => {
+    stopCamera();
     if (videoRef.current) {
-      try { videoRef.current.srcObject = null; } catch {}
+      videoRef.current.srcObject = null;
     }
-    if (detectionIntervalRef.current) {
-      clearInterval(detectionIntervalRef.current);
-      detectionIntervalRef.current = null;
-    }
-    setIsDetecting(false);
-  };
-
-  const startDNIDetection = () => {
-    // Run every ~300ms and require a few consecutive positives
-    detectionIntervalRef.current = setInterval(() => {
-      detectRectangle();
-    }, 300);
-  };
-
-  const detectRectangle = () => {
-    if (!videoRef.current || !canvasRef.current) return;
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-
-    if (!video.videoWidth || !video.videoHeight) return;
-
-    // Downscale processing for speed
-    const targetW = 320;
-    const scale = targetW / video.videoWidth;
-    const w = Math.max(160, Math.floor(video.videoWidth * scale));
-    const h = Math.max(120, Math.floor(video.videoHeight * scale));
-    canvas.width = w;
-    canvas.height = h;
-    ctx.drawImage(video, 0, 0, w, h);
-
-    const imageData = ctx.getImageData(0, 0, w, h);
-    const detected = simpleEdgeDetection(imageData);
-
-    detectRectangle._stable = (detectRectangle._stable || 0) + (detected ? 1 : -1);
-    if (detectRectangle._stable < 0) detectRectangle._stable = 0;
-    if (detectRectangle._stable >= 3) {
-      detectRectangle._stable = 0;
-      capturePhoto();
-    }
-  };
-
-  const simpleEdgeDetection = (imageData) => {
-    const data = imageData.data;
-    let edgeCount = 0;
-    const threshold = 40;
-    const minEdges = (imageData.width * imageData.height) / 35; // adaptive
-
-    for (let i = 0; i < data.length; i += 4) {
-      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      if (i + imageData.width * 4 < data.length) {
-        const nextBrightness = (data[i + imageData.width * 4] + data[i + imageData.width * 4 + 1] + data[i + imageData.width * 4 + 2]) / 3;
-        if (Math.abs(brightness - nextBrightness) > threshold) {
-          edgeCount++;
-        }
-      }
-    }
-
-    return edgeCount > minEdges;
-  };
+  }
 
   const capturePhoto = () => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -154,19 +108,18 @@ const DocumentScanner = () => {
 
       if (dniStep === 'front') {
         setDniImages(prev => ({ ...prev, front: imageUrl }));
-        stopCamera();
+        stopCameraAndClear();
         setTimeout(() => {
           setDniStep('back');
-          startCamera();
-        }, 500);
+        }, 100); // Short delay before showing next step
       } else if (dniStep === 'back') {
         setDniImages(prev => ({ ...prev, back: imageUrl }));
-        stopCamera();
+        stopCameraAndClear();
         setDniStep('preview');
       }
     } else if (mode === 'document') {
       setCapturedImages(prev => [...prev, imageUrl]);
-      stopCamera();
+      stopCameraAndClear();
     }
   };
 
@@ -178,13 +131,19 @@ const DocumentScanner = () => {
     if (side === 'front') {
       setDniImages(prev => ({ ...prev, front: null }));
       setDniStep('front');
-      startCamera();
     } else {
       setDniImages(prev => ({ ...prev, back: null }));
       setDniStep('back');
-      startCamera();
     }
   };
+
+  useEffect(() => {
+    if (mode === 'dni' && (dniStep === 'front' || dniStep === 'back') && !dniImages[dniStep]) {
+      startCamera();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, dniStep, dniImages.front, dniImages.back]);
+
 
   const dataURLToUint8Array = (dataURL) => {
     const base64 = dataURL.split(',')[1];
@@ -270,139 +229,70 @@ const DocumentScanner = () => {
 
   const openCropMode = (type, index, src) => {
     setCurrentCrop({ type, index, src });
-    setCropPoints({ x: 40, y: 40, width: 300, height: 400 });
+    setCrop({ x: 0, y: 0 });
+    setZoom(1);
+    setCroppedAreaPixels(null);
     setCropMode(true);
   };
 
-  const applyCrop = () => {
-    if (!currentCrop.src) { setCropMode(false); return; }
-    const stage = cropStageRef.current;
-    const imgEl = cropImgRef.current;
-    if (!stage || !imgEl) { setCropMode(false); return; }
+  const createImage = (url) =>
+    new Promise((resolve, reject) => {
+      const image = new Image();
+      image.addEventListener('load', () => resolve(image));
+      image.addEventListener('error', (error) => reject(error));
+      image.setAttribute('crossOrigin', 'anonymous'); // needed to avoid cross-origin issues
+      image.src = url;
+    });
 
-    const stageRect = stage.getBoundingClientRect();
-    const imgRect = imgEl.getBoundingClientRect();
+  const getCroppedImg = async (imageSrc, pixelCrop) => {
+    const image = await createImage(imageSrc);
+    const canvas = document.createElement('canvas');
+    canvas.width = pixelCrop.width;
+    canvas.height = pixelCrop.height;
+    const ctx = canvas.getContext('2d');
 
-    // Compute crop rectangle relative to the displayed image box
-    const cropLeft = cropPoints.x;
-    const cropTop = cropPoints.y;
-    const cropRight = cropPoints.x + cropPoints.width;
-    const cropBottom = cropPoints.y + cropPoints.height;
+    ctx.drawImage(
+      image,
+      pixelCrop.x,
+      pixelCrop.y,
+      pixelCrop.width,
+      pixelCrop.height,
+      0,
+      0,
+      pixelCrop.width,
+      pixelCrop.height
+    );
 
-    // Position of image box inside stage
-    const imgLeftInStage = imgRect.left - stageRect.left;
-    const imgTopInStage = imgRect.top - stageRect.top;
+    return canvas.toDataURL('image/jpeg', 0.92);
+  }
 
-    // Intersection with image area
-    const interLeft = Math.max(cropLeft, imgLeftInStage);
-    const interTop = Math.max(cropTop, imgTopInStage);
-    const interRight = Math.min(cropRight, imgLeftInStage + imgRect.width);
-    const interBottom = Math.min(cropBottom, imgTopInStage + imgRect.height);
-
-    const interW = Math.max(1, interRight - interLeft);
-    const interH = Math.max(1, interBottom - interTop);
-
-    // Map displayed pixels to natural pixels
-    const relXInImg = interLeft - imgLeftInStage;
-    const relYInImg = interTop - imgTopInStage;
-
-    const scaleX = imgEl.naturalWidth / imgRect.width;
-    const scaleY = imgEl.naturalHeight / imgRect.height;
-
-    const sx = Math.floor(relXInImg * scaleX);
-    const sy = Math.floor(relYInImg * scaleY);
-    const sw = Math.floor(interW * scaleX);
-    const sh = Math.floor(interH * scaleY);
-
-    const img = new Image();
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, sw); c.height = Math.max(1, sh);
-      const cctx = c.getContext('2d');
-      cctx.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
-      const cropped = c.toDataURL('image/jpeg', 0.92);
+  const applyCrop = async () => {
+    if (!croppedAreaPixels || !currentCrop.src) {
+      setCropMode(false);
+      return;
+    }
+    try {
+      const croppedImageUrl = await getCroppedImg(currentCrop.src, croppedAreaPixels);
       if (currentCrop.type === 'dni-front') {
-        setDniImages(prev => ({ ...prev, front: cropped }));
+        setDniImages(prev => ({ ...prev, front: croppedImageUrl }));
       } else if (currentCrop.type === 'dni-back') {
-        setDniImages(prev => ({ ...prev, back: cropped }));
+        setDniImages(prev => ({ ...prev, back: croppedImageUrl }));
       } else if (currentCrop.type === 'doc') {
-        setCapturedImages(prev => prev.map((p, i) => (i === currentCrop.index ? cropped : p)));
+        setCapturedImages(prev => prev.map((p, i) => (i === currentCrop.index ? croppedImageUrl : p)));
       }
       setCropMode(false);
       setCurrentCrop({ type: null, index: null, src: null });
-    };
-    img.src = currentCrop.src;
-  };
-
-  const onCropPointerDown = (e, mode) => {
-    const point = e.touches?.[0] || e;
-    cropDragRef.current = {
-      active: true,
-      mode,
-      startX: point.clientX,
-      startY: point.clientY,
-      start: { ...cropPoints },
-    };
-    window.addEventListener('mousemove', onCropPointerMove);
-    window.addEventListener('touchmove', onCropPointerMove, { passive: false });
-    window.addEventListener('mouseup', onCropPointerUp);
-    window.addEventListener('touchend', onCropPointerUp);
-  };
-
-  const onCropPointerMove = (e) => {
-    if (!cropDragRef.current.active) return;
-    const point = e.touches?.[0] || e;
-    if (e.cancelable) e.preventDefault();
-    const dx = point.clientX - cropDragRef.current.startX;
-    const dy = point.clientY - cropDragRef.current.startY;
-    const { start } = cropDragRef.current;
-    let rect = { ...start };
-    const stageRect = cropStageRef.current?.getBoundingClientRect();
-    switch (cropDragRef.current.mode) {
-      case 'move':
-        rect.x = Math.max(0, start.x + dx);
-        rect.y = Math.max(0, start.y + dy);
-        break;
-      case 'nw':
-        rect.x = Math.max(0, start.x + dx);
-        rect.y = Math.max(0, start.y + dy);
-        rect.width = Math.max(20, start.width - dx);
-        rect.height = Math.max(20, start.height - dy);
-        break;
-      case 'ne':
-        rect.y = Math.max(0, start.y + dy);
-        rect.width = Math.max(20, start.width + dx);
-        rect.height = Math.max(20, start.height - dy);
-        break;
-      case 'sw':
-        rect.x = Math.max(0, start.x + dx);
-        rect.width = Math.max(20, start.width - dx);
-        rect.height = Math.max(20, start.height + dy);
-        break;
-      case 'se':
-        rect.width = Math.max(20, start.width + dx);
-        rect.height = Math.max(20, start.height + dy);
-        break;
-      default:
-        break;
+    } catch (e) {
+      console.error(e);
+      alert('No se pudo recortar la imagen.');
+      setCropMode(false);
     }
-    // Clamp to stage bounds if available
-    if (stageRect) {
-      rect.x = Math.min(Math.max(0, rect.x), Math.max(0, stageRect.width - rect.width));
-      rect.y = Math.min(Math.max(0, rect.y), Math.max(0, stageRect.height - rect.height));
-      rect.width = Math.min(rect.width, stageRect.width);
-      rect.height = Math.min(rect.height, stageRect.height);
-    }
-    setCropPoints(rect);
   };
 
-  const onCropPointerUp = () => {
-    cropDragRef.current.active = false;
-    window.removeEventListener('mousemove', onCropPointerMove);
-    window.removeEventListener('touchmove', onCropPointerMove);
-    window.removeEventListener('mouseup', onCropPointerUp);
-    window.removeEventListener('touchend', onCropPointerUp);
-  };
+  const onCropComplete = useCallback((croppedArea, croppedAreaPixels) => {
+    setCroppedAreaPixels(croppedAreaPixels);
+  }, []);
+
 
   const resetApp = () => {
     setMode('home');
@@ -615,28 +505,33 @@ const DocumentScanner = () => {
   // Crop overlay
   if (cropMode) {
     return (
-      <div className="ds-root ds-capture" style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
-        <div style={{ maxWidth: 960, width: '100%', background: '#0b1220', borderRadius: 12, padding: 12 }}>
-          <div ref={cropStageRef} style={{ position: 'relative', width: '100%', height: '70vh', background: '#000', touchAction: 'none' }}>
-            {/* Background image */}
-            {currentCrop.src && (
-              <img ref={cropImgRef} src={currentCrop.src} alt="Recortar" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', userSelect: 'none', pointerEvents: 'none' }} />
-            )}
-            {/* Crop rectangle */}
-            <div
-              style={{ position: 'absolute', left: cropPoints.x, top: cropPoints.y, width: cropPoints.width, height: cropPoints.height, border: '2px solid #22c55e', boxShadow: '0 0 0 9999px rgba(34,197,94,0.15) inset', cursor: 'move' }}
-              onMouseDown={(e) => onCropPointerDown(e, 'move')}
-              onTouchStart={(e) => onCropPointerDown(e, 'move')}
-            >
-              {/* Handles */}
-              <div style={{ position: 'absolute', width: 16, height: 16, background: '#22c55e', left: -8, top: -8, cursor: 'nwse-resize' }} onMouseDown={(e) => onCropPointerDown(e, 'nw')} onTouchStart={(e) => onCropPointerDown(e, 'nw')} />
-              <div style={{ position: 'absolute', width: 16, height: 16, background: '#22c55e', right: -8, top: -8, cursor: 'nesw-resize' }} onMouseDown={(e) => onCropPointerDown(e, 'ne')} onTouchStart={(e) => onCropPointerDown(e, 'ne')} />
-              <div style={{ position: 'absolute', width: 16, height: 16, background: '#22c55e', left: -8, bottom: -8, cursor: 'nesw-resize' }} onMouseDown={(e) => onCropPointerDown(e, 'sw')} onTouchStart={(e) => onCropPointerDown(e, 'sw')} />
-              <div style={{ position: 'absolute', width: 16, height: 16, background: '#22c55e', right: -8, bottom: -8, cursor: 'nwse-resize' }} onMouseDown={(e) => onCropPointerDown(e, 'se')} onTouchStart={(e) => onCropPointerDown(e, 'se')} />
-            </div>
-          </div>
-
-          <div className="ds-bottombar" style={{ position: 'static', background: 'none', padding: '12px 0', display: 'flex', justifyContent: 'center', gap: 12 }}>
+      <div className="ds-root ds-cropper-container">
+        <div className="ds-cropper-inner">
+          <Cropper
+            image={currentCrop.src}
+            crop={crop}
+            zoom={zoom}
+            aspect={4 / 5}
+            onCropChange={setCrop}
+            onZoomChange={setZoom}
+            onCropComplete={onCropComplete}
+          />
+        </div>
+        <div className="ds-cropper-controls">
+           <div className="ds-cropper-zoom">
+             <label>Zoom</label>
+             <input
+              type="range"
+              value={zoom}
+              min={1}
+              max={3}
+              step={0.1}
+              aria-labelledby="Zoom"
+              onChange={(e) => setZoom(e.target.value)}
+              className="zoom-range"
+            />
+           </div>
+           <div className="ds-bottombar" style={{ position: 'static', background: 'none', padding: '12px 0', display: 'flex', justifyContent: 'center', gap: 12 }}>
             <button className="ds-btn ds-btn--green ds-btn-large" onClick={applyCrop}><Check className="ds-btn-icon" /> Aplicar</button>
             <button className="ds-btn ds-btn--gray ds-btn-large" onClick={() => { setCropMode(false); setCurrentCrop({ type: null, index: null, src: null }); }}><X className="ds-btn-icon" /> Cancelar</button>
           </div>

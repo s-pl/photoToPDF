@@ -286,6 +286,48 @@
 }
 .ds-page-number { font-weight: 800; font-size: 1.1rem; color: #0f172a; }
 
+.ds-page-card .ds-btn-sm {
+  padding: 6px;
+  height: 32px;
+  width: 32px;
+}
+.ds-page-card .ds-btn-sm svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* --- CROPPER STYLES --- */
+.ds-cropper-container {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: #0b1220;
+  display: flex;
+  flex-direction: column;
+}
+.ds-cropper-inner {
+  position: relative;
+  flex-grow: 1;
+}
+.ds-cropper-controls {
+  padding: 16px;
+  background: #111827;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ds-cropper-zoom {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: white;
+  font-size: 16px;
+}
+.ds-cropper-zoom input[type="range"] {
+  flex-grow: 1;
+}
+/* --- END CROPPER STYLES --- */
+
 /* Responsive */
 @media (min-width: 900px) {
   .ds-actions {
@@ -294,7 +336,7 @@
   .ds-dni-list {
     grid-template-columns: 1fr 1fr;
   }
-  .ds-doc-pages {
+  .ds-doc_pages {
     grid-template-columns: 1fr 1fr;
   }
 }
