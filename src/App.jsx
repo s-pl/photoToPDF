@@ -14,6 +14,8 @@ const DocumentScanner = () => {
   const [currentCrop, setCurrentCrop] = useState({ type: null, index: null, src: null });
   const [cropPoints, setCropPoints] = useState({ x: 40, y: 40, width: 300, height: 400 });
   const cropDragRef = useRef({ active: false, mode: 'move', startX: 0, startY: 0, start: { x: 0, y: 0, width: 0, height: 0 } });
+  const cropStageRef = useRef(null);
+  const cropImgRef = useRef(null);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -64,6 +66,9 @@ const DocumentScanner = () => {
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
       setStream(null);
+    }
+    if (videoRef.current) {
+      try { videoRef.current.srcObject = null; } catch {}
     }
     if (detectionIntervalRef.current) {
       clearInterval(detectionIntervalRef.current);
@@ -271,20 +276,50 @@ const DocumentScanner = () => {
 
   const applyCrop = () => {
     if (!currentCrop.src) { setCropMode(false); return; }
+    const stage = cropStageRef.current;
+    const imgEl = cropImgRef.current;
+    if (!stage || !imgEl) { setCropMode(false); return; }
+
+    const stageRect = stage.getBoundingClientRect();
+    const imgRect = imgEl.getBoundingClientRect();
+
+    // Compute crop rectangle relative to the displayed image box
+    const cropLeft = cropPoints.x;
+    const cropTop = cropPoints.y;
+    const cropRight = cropPoints.x + cropPoints.width;
+    const cropBottom = cropPoints.y + cropPoints.height;
+
+    // Position of image box inside stage
+    const imgLeftInStage = imgRect.left - stageRect.left;
+    const imgTopInStage = imgRect.top - stageRect.top;
+
+    // Intersection with image area
+    const interLeft = Math.max(cropLeft, imgLeftInStage);
+    const interTop = Math.max(cropTop, imgTopInStage);
+    const interRight = Math.min(cropRight, imgLeftInStage + imgRect.width);
+    const interBottom = Math.min(cropBottom, imgTopInStage + imgRect.height);
+
+    const interW = Math.max(1, interRight - interLeft);
+    const interH = Math.max(1, interBottom - interTop);
+
+    // Map displayed pixels to natural pixels
+    const relXInImg = interLeft - imgLeftInStage;
+    const relYInImg = interTop - imgTopInStage;
+
+    const scaleX = imgEl.naturalWidth / imgRect.width;
+    const scaleY = imgEl.naturalHeight / imgRect.height;
+
+    const sx = Math.floor(relXInImg * scaleX);
+    const sy = Math.floor(relYInImg * scaleY);
+    const sw = Math.floor(interW * scaleX);
+    const sh = Math.floor(interH * scaleY);
+
     const img = new Image();
     img.onload = () => {
-      // Assume cropPoints are relative to displayed canvas of video size; approximate to source img
-      const scaleX = img.width / (videoRef.current?.videoWidth || img.width);
-      const scaleY = img.height / (videoRef.current?.videoHeight || img.height);
-      const sx = Math.max(0, Math.floor(cropPoints.x * scaleX));
-      const sy = Math.max(0, Math.floor(cropPoints.y * scaleY));
-      const sw = Math.max(1, Math.floor(cropPoints.width * scaleX));
-      const sh = Math.max(1, Math.floor(cropPoints.height * scaleY));
-
       const c = document.createElement('canvas');
-      c.width = sw; c.height = sh;
+      c.width = Math.max(1, sw); c.height = Math.max(1, sh);
       const cctx = c.getContext('2d');
-      cctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      cctx.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
       const cropped = c.toDataURL('image/jpeg', 0.92);
       if (currentCrop.type === 'dni-front') {
         setDniImages(prev => ({ ...prev, front: cropped }));
@@ -322,6 +357,7 @@ const DocumentScanner = () => {
     const dy = point.clientY - cropDragRef.current.startY;
     const { start } = cropDragRef.current;
     let rect = { ...start };
+    const stageRect = cropStageRef.current?.getBoundingClientRect();
     switch (cropDragRef.current.mode) {
       case 'move':
         rect.x = Math.max(0, start.x + dx);
@@ -349,6 +385,13 @@ const DocumentScanner = () => {
         break;
       default:
         break;
+    }
+    // Clamp to stage bounds if available
+    if (stageRect) {
+      rect.x = Math.min(Math.max(0, rect.x), Math.max(0, stageRect.width - rect.width));
+      rect.y = Math.min(Math.max(0, rect.y), Math.max(0, stageRect.height - rect.height));
+      rect.width = Math.min(rect.width, stageRect.width);
+      rect.height = Math.min(rect.height, stageRect.height);
     }
     setCropPoints(rect);
   };
@@ -574,10 +617,10 @@ const DocumentScanner = () => {
     return (
       <div className="ds-root ds-capture" style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
         <div style={{ maxWidth: 960, width: '100%', background: '#0b1220', borderRadius: 12, padding: 12 }}>
-          <div style={{ position: 'relative', width: '100%', height: '70vh', background: '#000' }}>
+          <div ref={cropStageRef} style={{ position: 'relative', width: '100%', height: '70vh', background: '#000', touchAction: 'none' }}>
             {/* Background image */}
             {currentCrop.src && (
-              <img src={currentCrop.src} alt="Recortar" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }} />
+              <img ref={cropImgRef} src={currentCrop.src} alt="Recortar" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', userSelect: 'none', pointerEvents: 'none' }} />
             )}
             {/* Crop rectangle */}
             <div
