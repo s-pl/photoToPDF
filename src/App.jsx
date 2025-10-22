@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './DocumentScanner.css';
 import { Camera, FileText, CreditCard, Check, X, RotateCcw, Download, Plus, Trash2 } from 'lucide-react';
+import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 const DocumentScanner = () => {
   const [mode, setMode] = useState('home'); // home, dni, document
@@ -26,16 +27,26 @@ const DocumentScanner = () => {
 
   const startCamera = async () => {
     try {
+      // Stop previous stream if any
+      if (stream) {
+        try { stream.getTracks().forEach(t => t.stop()); } catch {}
+      }
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'environment',
           width: { ideal: 1920 },
           height: { ideal: 1080 }
-        }
+        },
+        audio: false
       });
       setStream(mediaStream);
       if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
+        const v = videoRef.current;
+        v.srcObject = mediaStream;
+        await new Promise(resolve => {
+          const onMeta = () => { v.play().catch(() => {}); v.removeEventListener('loadedmetadata', onMeta); resolve(); };
+          v.addEventListener('loadedmetadata', onMeta);
+        });
       }
 
       if (mode === 'dni') {
@@ -43,6 +54,7 @@ const DocumentScanner = () => {
         startDNIDetection();
       }
     } catch (err) {
+      console.error(err);
       alert('No se pudo acceder a la cámara. Por favor, permite el acceso.');
     }
   };
@@ -159,21 +171,49 @@ const DocumentScanner = () => {
     }
   };
 
-  const saveDNI = () => {
-    const link = document.createElement('a');
-    link.download = 'dni-frontal.jpg';
-    link.href = dniImages.front;
-    link.click();
+  const dataURLToUint8Array = (dataURL) => {
+    const base64 = dataURL.split(',')[1];
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  };
 
-    setTimeout(() => {
-      const link2 = document.createElement('a');
-      link2.download = 'dni-trasero.jpg';
-      link2.href = dniImages.back;
-      link2.click();
-    }, 500);
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
 
-    alert('¡DNI guardado! Las dos fotos se han descargado.');
-    resetApp();
+  const saveDNI = async () => {
+    try {
+      const pdfDoc = await PDFDocument.create();
+      for (const img of [dniImages.front, dniImages.back]) {
+        if (!img) continue;
+        const bytes = dataURLToUint8Array(img);
+        const embedded = img.startsWith('data:image/png') ? await pdfDoc.embedPng(bytes) : await pdfDoc.embedJpg(bytes);
+        const page = pdfDoc.addPage();
+        const { width: pw, height: ph } = page.getSize();
+        const iw = embedded.width, ih = embedded.height;
+        const margin = 36;
+        const scale = Math.min((pw - margin * 2) / iw, (ph - margin * 2) / ih);
+        const w = iw * scale, h = ih * scale;
+        const x = (pw - w) / 2, y = (ph - h) / 2;
+        page.drawImage(embedded, { x, y, width: w, height: h });
+      }
+      const bytesOut = await pdfDoc.save();
+      downloadBlob(new Blob([bytesOut], { type: 'application/pdf' }), 'DNI.pdf');
+      resetApp();
+    } catch (e) {
+      console.error(e);
+      alert('No se pudo generar el PDF del DNI');
+    }
   };
 
   const downloadPDF = async () => {
@@ -181,19 +221,32 @@ const DocumentScanner = () => {
       alert('No hay páginas para guardar');
       return;
     }
-
-    // Por simplicidad descargamos imágenes; en producción usar jsPDF o similar.
-    for (let i = 0; i < capturedImages.length; i++) {
-      setTimeout(() => {
-        const imgLink = document.createElement('a');
-        imgLink.download = `documento-pagina-${i + 1}.jpg`;
-        imgLink.href = capturedImages[i];
-        imgLink.click();
-      }, i * 500);
+    try {
+      const pdfDoc = await PDFDocument.create();
+      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      for (let i = 0; i < capturedImages.length; i++) {
+        const imgUrl = capturedImages[i];
+        const bytes = dataURLToUint8Array(imgUrl);
+        const embedded = imgUrl.startsWith('data:image/png') ? await pdfDoc.embedPng(bytes) : await pdfDoc.embedJpg(bytes);
+        const page = pdfDoc.addPage();
+        const { width: pw, height: ph } = page.getSize();
+        const iw = embedded.width, ih = embedded.height;
+        const margin = 36;
+        const maxW = pw - margin * 2;
+        const maxH = ph - margin * 2;
+        const scale = Math.min(maxW / iw, maxH / ih);
+        const w = iw * scale, h = ih * scale;
+        const x = (pw - w) / 2, y = (ph - h) / 2;
+        page.drawImage(embedded, { x, y, width: w, height: h });
+        page.drawText(`${i + 1}/${capturedImages.length}`, { x: pw - 72, y: 16, size: 10, font, color: rgb(0.4,0.4,0.4) });
+      }
+      const bytesOut = await pdfDoc.save();
+      downloadBlob(new Blob([bytesOut], { type: 'application/pdf' }), 'Documento.pdf');
+      resetApp();
+    } catch (e) {
+      console.error(e);
+      alert('No se pudo generar el PDF');
     }
-
-    alert(`¡Documento guardado! Se han descargado ${capturedImages.length} página(s).`);
-    resetApp();
   };
 
   const deleteImage = (index) => {
@@ -295,7 +348,7 @@ const DocumentScanner = () => {
     return (
       <div className="ds-root ds-capture">
         <div className="ds-video-wrap">
-          <video ref={videoRef} autoPlay playsInline className="ds-video" />
+          <video ref={videoRef} autoPlay playsInline muted className="ds-video" />
           <canvas ref={canvasRef} className="ds-canvas" />
 
           {/* guía visual */}
@@ -373,7 +426,7 @@ const DocumentScanner = () => {
     return (
       <div className="ds-root ds-capture">
         <div className="ds-video-wrap">
-          <video ref={videoRef} autoPlay playsInline className="ds-video" />
+          <video ref={videoRef} autoPlay playsInline muted className="ds-video" />
           <canvas ref={canvasRef} className="ds-canvas" />
 
           <div className="ds-topbar">
