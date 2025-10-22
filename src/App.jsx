@@ -48,8 +48,7 @@ const DocumentScanner = () => {
   }, [stopCamera]);
 
   const startCamera = async () => {
-    // Make sure to stop any existing stream before starting a new one.
-    stopCamera(); 
+    stopCamera();
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -60,15 +59,6 @@ const DocumentScanner = () => {
         audio: false
       });
       setStream(mediaStream);
-      if (videoRef.current) {
-        const v = videoRef.current;
-        v.srcObject = mediaStream;
-        await new Promise(resolve => {
-          const onMeta = () => { v.play().catch(() => {}); v.removeEventListener('loadedmetadata', onMeta); resolve(); };
-          v.addEventListener('loadedmetadata', onMeta);
-        });
-      }
-
       if (mode === 'dni') {
         setIsDetecting(true);
         startDNIDetection();
@@ -79,12 +69,22 @@ const DocumentScanner = () => {
     }
   };
 
-  const stopCameraAndClear = () => {
-    stopCamera();
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
+  useEffect(() => {
+    if (!stream || !videoRef.current) return;
+    const video = videoRef.current;
+    const handleLoaded = () => {
+      video.play().catch(() => {});
+    };
+    video.srcObject = stream;
+    if (video.readyState >= 1) {
+      handleLoaded();
+    } else {
+      video.addEventListener('loadedmetadata', handleLoaded);
     }
-  }
+    return () => {
+      video.removeEventListener('loadedmetadata', handleLoaded);
+    };
+  }, [stream]);
 
   const capturePhoto = () => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -108,18 +108,18 @@ const DocumentScanner = () => {
 
       if (dniStep === 'front') {
         setDniImages(prev => ({ ...prev, front: imageUrl }));
-        stopCameraAndClear();
+        stopCamera();
         setTimeout(() => {
           setDniStep('back');
         }, 100); // Short delay before showing next step
       } else if (dniStep === 'back') {
         setDniImages(prev => ({ ...prev, back: imageUrl }));
-        stopCameraAndClear();
+        stopCamera();
         setDniStep('preview');
       }
     } else if (mode === 'document') {
       setCapturedImages(prev => [...prev, imageUrl]);
-      stopCameraAndClear();
+      stopCamera();
     }
   };
 
@@ -143,6 +143,13 @@ const DocumentScanner = () => {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, dniStep, dniImages.front, dniImages.back]);
+
+  useEffect(() => {
+    if (mode === 'document' && capturedImages.length === 0 && !stream) {
+      startCamera();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, capturedImages.length, stream]);
 
 
   const dataURLToUint8Array = (dataURL) => {
@@ -315,7 +322,7 @@ const DocumentScanner = () => {
 
           <div className="ds-actions">
             <button
-              onClick={() => { setMode('dni'); startCamera(); }}
+              onClick={() => { setMode('dni'); setDniStep('front'); }}
               className="ds-card ds-card--blue"
             >
               <CreditCard className="ds-icon" />
@@ -324,7 +331,7 @@ const DocumentScanner = () => {
             </button>
 
             <button
-              onClick={() => { setMode('document'); startCamera(); }}
+              onClick={() => { setMode('document'); }}
               className="ds-card ds-card--green"
             >
               <FileText className="ds-icon" />
@@ -527,7 +534,7 @@ const DocumentScanner = () => {
               max={3}
               step={0.1}
               aria-labelledby="Zoom"
-              onChange={(e) => setZoom(e.target.value)}
+              onChange={(e) => setZoom(Number(e.target.value))}
               className="zoom-range"
             />
            </div>
