@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './DocumentScanner.css';
-import { Camera, FileText, CreditCard, Check, X, RotateCcw, Download, Plus, Trash2 } from 'lucide-react';
+import { Camera, FileText, CreditCard, Check, X, RotateCcw, Download, Plus, Trash2, Crop } from 'lucide-react';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 const DocumentScanner = () => {
@@ -11,8 +11,9 @@ const DocumentScanner = () => {
   const [stream, setStream] = useState(null);
   const [isDetecting, setIsDetecting] = useState(false);
   const [cropMode, setCropMode] = useState(false);
-  const [currentCropImage, setCurrentCropImage] = useState(null);
-  const [cropPoints, setCropPoints] = useState({ x: 50, y: 50, width: 300, height: 400 });
+  const [currentCrop, setCurrentCrop] = useState({ type: null, index: null, src: null });
+  const [cropPoints, setCropPoints] = useState({ x: 40, y: 40, width: 300, height: 400 });
+  const cropDragRef = useRef({ active: false, mode: 'move', startX: 0, startY: 0, start: { x: 0, y: 0, width: 0, height: 0 } });
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -72,9 +73,10 @@ const DocumentScanner = () => {
   };
 
   const startDNIDetection = () => {
+    // Run every ~300ms and require a few consecutive positives
     detectionIntervalRef.current = setInterval(() => {
       detectRectangle();
-    }, 500);
+    }, 300);
   };
 
   const detectRectangle = () => {
@@ -86,14 +88,22 @@ const DocumentScanner = () => {
 
     if (!video.videoWidth || !video.videoHeight) return;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
+    // Downscale processing for speed
+    const targetW = 320;
+    const scale = targetW / video.videoWidth;
+    const w = Math.max(160, Math.floor(video.videoWidth * scale));
+    const h = Math.max(120, Math.floor(video.videoHeight * scale));
+    canvas.width = w;
+    canvas.height = h;
+    ctx.drawImage(video, 0, 0, w, h);
 
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, w, h);
     const detected = simpleEdgeDetection(imageData);
 
-    if (detected) {
+    detectRectangle._stable = (detectRectangle._stable || 0) + (detected ? 1 : -1);
+    if (detectRectangle._stable < 0) detectRectangle._stable = 0;
+    if (detectRectangle._stable >= 3) {
+      detectRectangle._stable = 0;
       capturePhoto();
     }
   };
@@ -101,8 +111,8 @@ const DocumentScanner = () => {
   const simpleEdgeDetection = (imageData) => {
     const data = imageData.data;
     let edgeCount = 0;
-    const threshold = 50;
-    const minEdges = 1000;
+    const threshold = 40;
+    const minEdges = (imageData.width * imageData.height) / 35; // adaptive
 
     for (let i = 0; i < data.length; i += 4) {
       const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
@@ -253,14 +263,102 @@ const DocumentScanner = () => {
     setCapturedImages(prev => prev.filter((_, i) => i !== index));
   };
 
-  const openCropMode = (imageUrl) => {
-    setCurrentCropImage(imageUrl);
+  const openCropMode = (type, index, src) => {
+    setCurrentCrop({ type, index, src });
+    setCropPoints({ x: 40, y: 40, width: 300, height: 400 });
     setCropMode(true);
   };
 
   const applyCrop = () => {
-    setCropMode(false);
-    setCurrentCropImage(null);
+    if (!currentCrop.src) { setCropMode(false); return; }
+    const img = new Image();
+    img.onload = () => {
+      // Assume cropPoints are relative to displayed canvas of video size; approximate to source img
+      const scaleX = img.width / (videoRef.current?.videoWidth || img.width);
+      const scaleY = img.height / (videoRef.current?.videoHeight || img.height);
+      const sx = Math.max(0, Math.floor(cropPoints.x * scaleX));
+      const sy = Math.max(0, Math.floor(cropPoints.y * scaleY));
+      const sw = Math.max(1, Math.floor(cropPoints.width * scaleX));
+      const sh = Math.max(1, Math.floor(cropPoints.height * scaleY));
+
+      const c = document.createElement('canvas');
+      c.width = sw; c.height = sh;
+      const cctx = c.getContext('2d');
+      cctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      const cropped = c.toDataURL('image/jpeg', 0.92);
+      if (currentCrop.type === 'dni-front') {
+        setDniImages(prev => ({ ...prev, front: cropped }));
+      } else if (currentCrop.type === 'dni-back') {
+        setDniImages(prev => ({ ...prev, back: cropped }));
+      } else if (currentCrop.type === 'doc') {
+        setCapturedImages(prev => prev.map((p, i) => (i === currentCrop.index ? cropped : p)));
+      }
+      setCropMode(false);
+      setCurrentCrop({ type: null, index: null, src: null });
+    };
+    img.src = currentCrop.src;
+  };
+
+  const onCropPointerDown = (e, mode) => {
+    const point = e.touches?.[0] || e;
+    cropDragRef.current = {
+      active: true,
+      mode,
+      startX: point.clientX,
+      startY: point.clientY,
+      start: { ...cropPoints },
+    };
+    window.addEventListener('mousemove', onCropPointerMove);
+    window.addEventListener('touchmove', onCropPointerMove, { passive: false });
+    window.addEventListener('mouseup', onCropPointerUp);
+    window.addEventListener('touchend', onCropPointerUp);
+  };
+
+  const onCropPointerMove = (e) => {
+    if (!cropDragRef.current.active) return;
+    const point = e.touches?.[0] || e;
+    if (e.cancelable) e.preventDefault();
+    const dx = point.clientX - cropDragRef.current.startX;
+    const dy = point.clientY - cropDragRef.current.startY;
+    const { start } = cropDragRef.current;
+    let rect = { ...start };
+    switch (cropDragRef.current.mode) {
+      case 'move':
+        rect.x = Math.max(0, start.x + dx);
+        rect.y = Math.max(0, start.y + dy);
+        break;
+      case 'nw':
+        rect.x = Math.max(0, start.x + dx);
+        rect.y = Math.max(0, start.y + dy);
+        rect.width = Math.max(20, start.width - dx);
+        rect.height = Math.max(20, start.height - dy);
+        break;
+      case 'ne':
+        rect.y = Math.max(0, start.y + dy);
+        rect.width = Math.max(20, start.width + dx);
+        rect.height = Math.max(20, start.height - dy);
+        break;
+      case 'sw':
+        rect.x = Math.max(0, start.x + dx);
+        rect.width = Math.max(20, start.width - dx);
+        rect.height = Math.max(20, start.height + dy);
+        break;
+      case 'se':
+        rect.width = Math.max(20, start.width + dx);
+        rect.height = Math.max(20, start.height + dy);
+        break;
+      default:
+        break;
+    }
+    setCropPoints(rect);
+  };
+
+  const onCropPointerUp = () => {
+    cropDragRef.current.active = false;
+    window.removeEventListener('mousemove', onCropPointerMove);
+    window.removeEventListener('touchmove', onCropPointerMove);
+    window.removeEventListener('mouseup', onCropPointerUp);
+    window.removeEventListener('touchend', onCropPointerUp);
   };
 
   const resetApp = () => {
@@ -321,6 +419,10 @@ const DocumentScanner = () => {
                 <button onClick={() => retakeDNI('front')} className="ds-btn ds-btn--orange">
                   <RotateCcw className="ds-btn-icon" /> Repetir Foto
                 </button>
+                <div style={{ height: 8 }} />
+                <button onClick={() => openCropMode('dni-front', 0, dniImages.front)} className="ds-btn ds-btn--blue ds-btn-small">
+                  <Crop className="ds-btn-icon" /> Ajustar bordes
+                </button>
               </div>
 
               <div className="ds-card-white">
@@ -328,6 +430,10 @@ const DocumentScanner = () => {
                 <img src={dniImages.back} alt="DNI Trasero" className="ds-preview-img" />
                 <button onClick={() => retakeDNI('back')} className="ds-btn ds-btn--orange">
                   <RotateCcw className="ds-btn-icon" /> Repetir Foto
+                </button>
+                <div style={{ height: 8 }} />
+                <button onClick={() => openCropMode('dni-back', 0, dniImages.back)} className="ds-btn ds-btn--blue ds-btn-small">
+                  <Crop className="ds-btn-icon" /> Ajustar bordes
                 </button>
               </div>
             </div>
@@ -398,9 +504,14 @@ const DocumentScanner = () => {
                 <div key={index} className="ds-card-white ds-page-card">
                   <div className="ds-page-header">
                     <span className="ds-page-number">Página {index + 1}</span>
-                    <button onClick={() => deleteImage(index)} className="ds-btn ds-btn--red ds-btn-sm">
-                      <Trash2 />
-                    </button>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button onClick={() => openCropMode('doc', index, img)} className="ds-btn ds-btn--blue ds-btn-sm">
+                        <Crop />
+                      </button>
+                      <button onClick={() => deleteImage(index)} className="ds-btn ds-btn--red ds-btn-sm">
+                        <Trash2 />
+                      </button>
+                    </div>
                   </div>
                   <img src={img} alt={`Página ${index + 1}`} className="ds-preview-img" />
                 </div>
@@ -452,6 +563,39 @@ const DocumentScanner = () => {
                 <X />
               </button>
             </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Crop overlay
+  if (cropMode) {
+    return (
+      <div className="ds-root ds-capture" style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+        <div style={{ maxWidth: 960, width: '100%', background: '#0b1220', borderRadius: 12, padding: 12 }}>
+          <div style={{ position: 'relative', width: '100%', height: '70vh', background: '#000' }}>
+            {/* Background image */}
+            {currentCrop.src && (
+              <img src={currentCrop.src} alt="Recortar" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }} />
+            )}
+            {/* Crop rectangle */}
+            <div
+              style={{ position: 'absolute', left: cropPoints.x, top: cropPoints.y, width: cropPoints.width, height: cropPoints.height, border: '2px solid #22c55e', boxShadow: '0 0 0 9999px rgba(34,197,94,0.15) inset', cursor: 'move' }}
+              onMouseDown={(e) => onCropPointerDown(e, 'move')}
+              onTouchStart={(e) => onCropPointerDown(e, 'move')}
+            >
+              {/* Handles */}
+              <div style={{ position: 'absolute', width: 16, height: 16, background: '#22c55e', left: -8, top: -8, cursor: 'nwse-resize' }} onMouseDown={(e) => onCropPointerDown(e, 'nw')} onTouchStart={(e) => onCropPointerDown(e, 'nw')} />
+              <div style={{ position: 'absolute', width: 16, height: 16, background: '#22c55e', right: -8, top: -8, cursor: 'nesw-resize' }} onMouseDown={(e) => onCropPointerDown(e, 'ne')} onTouchStart={(e) => onCropPointerDown(e, 'ne')} />
+              <div style={{ position: 'absolute', width: 16, height: 16, background: '#22c55e', left: -8, bottom: -8, cursor: 'nesw-resize' }} onMouseDown={(e) => onCropPointerDown(e, 'sw')} onTouchStart={(e) => onCropPointerDown(e, 'sw')} />
+              <div style={{ position: 'absolute', width: 16, height: 16, background: '#22c55e', right: -8, bottom: -8, cursor: 'nwse-resize' }} onMouseDown={(e) => onCropPointerDown(e, 'se')} onTouchStart={(e) => onCropPointerDown(e, 'se')} />
+            </div>
+          </div>
+
+          <div className="ds-bottombar" style={{ position: 'static', background: 'none', padding: '12px 0', display: 'flex', justifyContent: 'center', gap: 12 }}>
+            <button className="ds-btn ds-btn--green ds-btn-large" onClick={applyCrop}><Check className="ds-btn-icon" /> Aplicar</button>
+            <button className="ds-btn ds-btn--gray ds-btn-large" onClick={() => { setCropMode(false); setCurrentCrop({ type: null, index: null, src: null }); }}><X className="ds-btn-icon" /> Cancelar</button>
           </div>
         </div>
       </div>
